@@ -1,0 +1,81 @@
+Goal
+
+Leg 1's job is to catch application errors as they happen, gather enough context around each one, and hand off a clean, structured package that Leg 2 can feed directly into Amazon Bedrock for root-cause analysis. Leg 1 does not do any AI reasoning itself — it's purely detection, cleanup, and packaging.
+
+What was built
+
+1. CloudWatch log source
+
+Identified /PayActiv/internalapis/code as the log group to monitor, out of ~791 total log groups in the account, since it's where backend/API errors for the internal APIs surface.
+
+2. CloudWatch Subscription Filter
+
+A filter pattern was defined to only trigger on log lines that actually matter:
+
+?ERROR ?Exception ?Failed ?Timeout ?500 ?NullReferenceException ?StackTrace
+
+This means the Lambda function below only runs when something resembling a real error appears — not on every log line — which keeps invocation counts (and downstream Bedrock costs) low.
+
+3. Lambda function (log_processor)
+
+Written in Python. On each trigger, it:
+
+
+Decodes the gzip/base64 CloudWatch payload
+Extracts the error message, log group, log stream, and timestamp
+Fetches the surrounding log lines (±30 seconds) around the error using logs.get_log_events, so there's real context for analysis later, not just a bare error string
+Filters out known noise (health checks, pings, warmups, debug/info lines) so those never even make it to storage
+
+
+4. Snowflake config check
+
+Added a module (snowflake_config.py) that checks whether a given error/application pair should be ignored, and what severity (High/Medium/Low) and routing team it maps to.
+
+Status: stubbed, not yet live. Snowflake isn't connected with real credentials yet, so this currently runs on local keyword-based defaults (e.g. timeouts → High severity → infra team). The real Snowflake query is already written in the file's docstring — once credentials exist, only that one function needs to be filled in; nothing else in the pipeline changes.
+
+5. Bedrock payload preparation
+
+Added a module (bedrock_payload.py) that takes the cleaned error + context + severity/routing and assembles it into the exact structured object Leg 2 will hand to Bedrock — including a pre-written prompt asking for root cause, quick fix, long-term fix, and relevant C#/SQL snippets.
+
+6. Storage
+
+Two DynamoDB tables:
+
+
+ProActiv-ErrorContext — the raw cleaned record (error, context logs, severity, routing)
+ProActiv-BedrockPayloads — the final structured payload, ready for Leg 2 to read and send straight to Bedrock with no extra assembly required
+
+
+What's still pending
+
+
+Real Snowflake connection (currently stubbed with safe defaults)
+Actual deployment of the Lambda into AWS (code is written and syntax-checked, but hasn't been deployed/tested against live traffic yet)
+The IAM role and permissions need to be created and attached (listed in docs/leg1-design.md)
+
+
+How it got into GitHub
+
+
+All files were organized into a repo structure (lambda/, cloudwatch/, dynamodb/, docs/, README.md)
+Uploaded via GitHub's web "upload an existing file" flow (drag-and-drop) into the Leg-1 repository
+Committed directly to main
+
+
+Repo structure
+
+Leg-1/
+├── README.md
+├── lambda/log_processor/
+│   ├── lambda_function.py       # main handler
+│   ├── snowflake_config.py      # severity/routing lookup (stubbed)
+│   ├── bedrock_payload.py       # builds Leg 2's input payload
+│   └── requirements.txt
+├── cloudwatch/
+│   ├── filter-pattern.txt
+│   └── subscription-filter.md   # setup steps (console + CLI)
+├── dynamodb/
+│   └── table-schema.md          # both table schemas + create commands
+└── docs/
+    ├── leg1-design.md           # architecture/flow writeup
+    └── WHAT_I_DID.md            # this file
